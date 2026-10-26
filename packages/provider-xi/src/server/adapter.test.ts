@@ -35,6 +35,8 @@ process.stdin.on("data", (chunk) => {
     } else if (message.method === "session/prompt") {
       send({ jsonrpc: "2.0", id: message.id, result: { accepted: true } });
       send({ jsonrpc: "2.0", method: "session/message", params: { sessionId: "s1", event: "message_end", message: { role: "assistant", content: [{ type: "text", text: "hello from xi" }] } } });
+      send({ jsonrpc: "2.0", method: "session/plan", params: { sessionId: "s1", tasks: [{ id: 1, subject: "do it", status: "completed" }] } });
+      send({ jsonrpc: "2.0", method: "session/usage", params: { sessionId: "s1", contextTokens: 10, contextOK: true, contextWindow: 100, usage: { Input: 5, Output: 2, CacheRead: 0 } } });
       send({ jsonrpc: "2.0", method: "session/run_done", params: { sessionId: "s1", error: "", errorKind: "", window: "", resetsAt: "" } });
     }
   }
@@ -122,6 +124,31 @@ describe("XiAdapterV2", () => {
         ),
       ).toBe(true);
       expect(list.some((event) => event.type === "turn.terminal")).toBe(true);
+      expect(
+        list.some((event) => {
+          const value = event as unknown as {
+            type: string;
+            turnItem?: { type?: string; steps?: ReadonlyArray<unknown> };
+          };
+          return (
+            value.type === "turn_item.updated" &&
+            value.turnItem?.type === "todo_list" &&
+            (value.turnItem.steps?.length ?? 0) === 1
+          );
+        }),
+      ).toBe(true);
+      expect(
+        list.some((event) => {
+          const value = event as unknown as {
+            type: string;
+            providerTurn?: { tokenUsage?: { usedTokens?: number } };
+          };
+          return (
+            value.type === "provider_turn.updated" &&
+            value.providerTurn?.tokenUsage?.usedTokens === 10
+          );
+        }),
+      ).toBe(true);
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 });

@@ -1,5 +1,6 @@
 import {
   MessageId,
+  PlanId,
   ProviderDriverKind,
   ProviderThreadId,
   ProviderTurnId,
@@ -208,6 +209,9 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
           readonly nodeId: string;
           readonly runOrdinal: number;
           readonly messageId: string;
+          readonly attemptId: string;
+          readonly providerTurnOrdinal: number;
+          readonly startedAt: DateTime.Utc;
         } | null = null;
         let sessionEntity: OrchestrationV2ProviderSession = {
           id: sessionInput.providerSessionId,
@@ -413,6 +417,99 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
               });
               continue;
             }
+            if (notification.method === "session/plan") {
+              const turn = activeTurn;
+              if (turn === null || thread === null) continue;
+              const tasks = Array.isArray(notification.params["tasks"])
+                ? notification.params["tasks"]
+                : [];
+              const steps = tasks.flatMap((task, index) => {
+                if (typeof task !== "object" || task === null) return [];
+                const record = task as Record<string, unknown>;
+                const text = typeof record["subject"] === "string" ? record["subject"].trim() : "";
+                if (text === "") return [];
+                const raw = record["status"];
+                const status =
+                  raw === "completed" ? "completed" : raw === "in_progress" ? "running" : "pending";
+                return [{ id: String(record["id"] ?? index + 1), text, status }];
+              });
+              const ordinal = itemOrdinals.get("plan") ?? nextItemOrdinal++;
+              itemOrdinals.set("plan", ordinal);
+              const at = yield* DateTime.now;
+              const allDone =
+                steps.length > 0 && steps.every((step) => step.status === "completed");
+              yield* emit({
+                type: "turn_item.updated",
+                driver: XI_PROVIDER,
+                turnItem: {
+                  id: TurnItemId.make("xi-todo"),
+                  threadId: turn.threadId as never,
+                  runId: turn.runId as never,
+                  nodeId: turn.nodeId as never,
+                  providerThreadId: thread.id,
+                  providerTurnId: turn.id,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal,
+                  status: (allDone ? "completed" : "running") as never,
+                  title: "Plan",
+                  startedAt: at,
+                  completedAt: allDone ? at : null,
+                  updatedAt: at,
+                  type: "todo_list" as const,
+                  planId: PlanId.make("xi-todo"),
+                  steps,
+                } as never,
+              });
+              continue;
+            }
+            if (notification.method === "session/usage") {
+              const turn = activeTurn;
+              if (turn === null || thread === null) continue;
+              const used = notification.params["contextTokens"];
+              if (typeof used !== "number" || !Number.isFinite(used) || used < 0) continue;
+              const window = notification.params["contextWindow"];
+              const usage = notification.params["usage"];
+              const usageRecord =
+                typeof usage === "object" && usage !== null
+                  ? (usage as Record<string, unknown>)
+                  : {};
+              const count = (key: string) => {
+                const value = usageRecord[key];
+                return typeof value === "number" && Number.isFinite(value) && value >= 0
+                  ? Math.trunc(value)
+                  : undefined;
+              };
+              const at = yield* DateTime.now;
+              yield* emit({
+                type: "provider_turn.updated",
+                driver: XI_PROVIDER,
+                providerTurn: {
+                  id: turn.id,
+                  providerThreadId: thread.id,
+                  nodeId: turn.nodeId as never,
+                  runAttemptId: turn.attemptId as never,
+                  nativeTurnRef: null,
+                  ordinal: turn.providerTurnOrdinal,
+                  status: "running",
+                  startedAt: turn.startedAt,
+                  completedAt: null,
+                  tokenUsage: {
+                    usedTokens: Math.trunc(used),
+                    ...(typeof window === "number" && window > 0
+                      ? { maxTokens: Math.trunc(window) }
+                      : {}),
+                    ...(count("Input") === undefined ? {} : { inputTokens: count("Input")! }),
+                    ...(count("CacheRead") === undefined
+                      ? {}
+                      : { cachedInputTokens: count("CacheRead")! }),
+                    ...(count("Output") === undefined ? {} : { outputTokens: count("Output")! }),
+                    updatedAt: DateTime.formatIso(at),
+                  },
+                },
+              });
+              continue;
+            }
             if (notification.method === "session/question") {
               const callId =
                 typeof notification.params["callId"] === "string"
@@ -544,6 +641,7 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
               );
               appliedThinking = requestedThinking;
             }
+            const startedAt = yield* DateTime.now;
             activeTurn = {
               id: ProviderTurnId.make(`xi-${turnInput.attemptId}`),
               runId: turnInput.runId,
@@ -551,8 +649,10 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
               nodeId: turnInput.rootNodeId,
               runOrdinal: turnInput.runOrdinal,
               messageId: `xi-${turnInput.attemptId}-assistant`,
+              attemptId: turnInput.attemptId,
+              providerTurnOrdinal: turnInput.providerTurnOrdinal,
+              startedAt,
             };
-            const startedAt = yield* DateTime.now;
             yield* emit({
               type: "provider_turn.updated",
               driver: XI_PROVIDER,
