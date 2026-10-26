@@ -243,6 +243,7 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
           }
         >();
         const itemOrdinals = new Map<string, number>();
+        const toolArguments = new Map<string, unknown>();
         let nextItemOrdinal = 1;
 
         const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
@@ -401,7 +402,9 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
               const content = resultRecord?.["Content"];
               const output =
                 typeof content === "string" && content.trim() !== "" ? content : undefined;
-              const argumentsRecord = notification.params["arguments"];
+              const incomingArguments = notification.params["arguments"];
+              if (incomingArguments !== undefined) toolArguments.set(callId, incomingArguments);
+              const argumentsRecord = toolArguments.get(callId);
               const command =
                 typeof argumentsRecord === "object" &&
                 argumentsRecord !== null &&
@@ -497,6 +500,19 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
               const at = yield* DateTime.now;
               const allDone =
                 steps.length > 0 && steps.every((step) => step.status === "completed");
+              yield* emit({
+                type: "plan.updated",
+                driver: XI_PROVIDER,
+                plan: {
+                  id: PlanId.make("xi-todo"),
+                  threadId: turn.threadId as never,
+                  runId: turn.runId as never,
+                  nodeId: turn.nodeId as never,
+                  status: allDone ? "completed" : "active",
+                  kind: "todo_list",
+                  steps,
+                } as never,
+              });
               yield* emit({
                 type: "turn_item.updated",
                 driver: XI_PROVIDER,
