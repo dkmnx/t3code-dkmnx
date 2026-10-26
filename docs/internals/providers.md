@@ -160,3 +160,11 @@ The logger filters those notifications before traversal when an older provider s
 
 Model classification has its own [manifest constraints](./model-manifest.md). Assistant-reference
 handling is documented under [citations](./assistant-citations.md).
+
+## xi
+
+xi keeps one workspace per process: a session's `cwd` must equal the launch directory, and
+`additionalDirectories` and `mcpServers` are refused over `xi rpc`. Isolate an instance with
+`XI_CONFIG_DIR`, `XI_STATE_DIR`, `XI_CODING_AGENT_DIR`, and `XI_CACHE_DIR`. The provider reads the
+model catalog from `xi models --json` without a session. Each row carries its own thinking levels;
+a model with no levels advertises no reasoning control.
