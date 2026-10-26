@@ -1,9 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NodeFS from "node:fs/promises";
+import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import * as os from "node:os";
+import * as NodeOS from "node:os";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
@@ -62,15 +62,15 @@ describe("XiAdapterV2", () => {
   it.effect("opens a session, prompts, and streams the answer", () =>
     Effect.gen(function* () {
       const dir = yield* Effect.tryPromise(() =>
-        NodeFS.mkdtemp(NodePath.join(os.tmpdir(), "xi-adapter-")),
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "xi-adapter-")),
       );
       const agentFile = NodePath.join(dir, "agent.mjs");
       const wrapper = NodePath.join(dir, "xi");
-      yield* Effect.tryPromise(() => NodeFS.writeFile(agentFile, fakeAgent));
+      yield* Effect.tryPromise(() => NodeFSP.writeFile(agentFile, fakeAgent));
       yield* Effect.tryPromise(() =>
-        NodeFS.writeFile(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${agentFile}"\n`),
+        NodeFSP.writeFile(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${agentFile}"\n`),
       );
-      yield* Effect.tryPromise(() => NodeFS.chmod(wrapper, 0o755));
+      yield* Effect.tryPromise(() => NodeFSP.chmod(wrapper, 0o755));
 
       const config = decodeXiSettings({
         enabled: true,
