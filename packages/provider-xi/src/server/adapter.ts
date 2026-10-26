@@ -308,6 +308,33 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
               const turn = activeTurn;
               if (turn === null || text === "") continue;
               const at = yield* DateTime.now;
+              const streaming = notification.params["event"] !== "message_end";
+              const ordinal = itemOrdinals.get(`assistant:${turn.messageId}`) ?? nextItemOrdinal++;
+              itemOrdinals.set(`assistant:${turn.messageId}`, ordinal);
+              yield* emit({
+                type: "turn_item.updated",
+                driver: XI_PROVIDER,
+                turnItem: {
+                  id: TurnItemId.make(`xi-${turn.messageId}`),
+                  threadId: turn.threadId as never,
+                  runId: turn.runId as never,
+                  nodeId: turn.nodeId as never,
+                  providerThreadId: thread?.id ?? null,
+                  providerTurnId: turn.id,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal,
+                  status: (streaming ? "running" : "completed") as never,
+                  title: null,
+                  startedAt: at,
+                  completedAt: streaming ? null : at,
+                  updatedAt: at,
+                  type: "assistant_message" as const,
+                  messageId: MessageId.make(turn.messageId),
+                  text,
+                  streaming,
+                } as never,
+              });
               yield* emit({
                 type: "message.updated",
                 driver: XI_PROVIDER,
@@ -319,7 +346,7 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
                   role: "assistant",
                   text,
                   attachments: [],
-                  streaming: notification.params["event"] !== "message_end",
+                  streaming,
                   createdBy: "agent",
                   creationSource: "provider",
                   createdAt: at,
