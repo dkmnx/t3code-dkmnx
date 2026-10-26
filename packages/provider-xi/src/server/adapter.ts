@@ -225,6 +225,15 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
           updatedAt: yield* DateTime.now,
           lastError: null,
         };
+        const pendingQuestions = new Map<
+          string,
+          {
+            readonly callId: string;
+            readonly threadId: string;
+            readonly request: OrchestrationV2RuntimeRequest;
+            readonly questionIds: ReadonlyArray<string>;
+          }
+        >();
         const approvals = new Map<
           string,
           {
@@ -550,11 +559,120 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
               continue;
             }
             if (notification.method === "session/question") {
+              const turn = activeTurn;
+              if (turn === null || thread === null) continue;
               const callId =
                 typeof notification.params["callId"] === "string"
                   ? notification.params["callId"]
                   : "";
-              if (callId !== "") yield* replyXiQuestion(connection, callId, undefined);
+              if (callId === "") continue;
+              const rawQuestions = Array.isArray(notification.params["questions"])
+                ? notification.params["questions"]
+                : [];
+              const mapped = rawQuestions.flatMap((value, index) => {
+                if (typeof value !== "object" || value === null) return [];
+                const record = value as Record<string, unknown>;
+                const question =
+                  typeof record["Question"] === "string"
+                    ? record["Question"]
+                    : typeof record["question"] === "string"
+                      ? record["question"]
+                      : "";
+                if (question.trim() === "") return [];
+                const header =
+                  typeof record["Header"] === "string"
+                    ? record["Header"]
+                    : typeof record["header"] === "string"
+                      ? record["header"]
+                      : "";
+                const options = Array.isArray(record["Options"])
+                  ? record["Options"]
+                  : Array.isArray(record["options"])
+                    ? record["options"]
+                    : [];
+                const choices = options.flatMap((option) => {
+                  if (typeof option !== "object" || option === null) return [];
+                  const choice = option as Record<string, unknown>;
+                  const label =
+                    typeof choice["Label"] === "string"
+                      ? choice["Label"]
+                      : typeof choice["label"] === "string"
+                        ? choice["label"]
+                        : "";
+                  if (label.trim() === "") return [];
+                  const description =
+                    typeof choice["Description"] === "string"
+                      ? choice["Description"]
+                      : typeof choice["description"] === "string"
+                        ? choice["description"]
+                        : label;
+                  return [{ label, description }];
+                });
+                return [
+                  {
+                    id: `q${index + 1}`,
+                    header: header.trim() === "" ? "Question" : header,
+                    question,
+                    options: choices,
+                    multiSelect: record["Multiple"] === true || record["multiple"] === true,
+                  },
+                ];
+              });
+              if (mapped.length === 0) {
+                yield* replyXiQuestion(connection, callId, undefined);
+                continue;
+              }
+              const requestId = RuntimeRequestId.make(`xi-${callId}`);
+              const at = yield* DateTime.now;
+              const request: OrchestrationV2RuntimeRequest = {
+                id: requestId,
+                nodeId: turn.nodeId as never,
+                providerTurnId: turn.id,
+                nativeRequestRef: null,
+                kind: "user_input",
+                status: "pending",
+                responseCapability: {
+                  type: "live",
+                  providerSessionId: sessionInput.providerSessionId,
+                },
+                createdAt: at,
+                resolvedAt: null,
+              };
+              pendingQuestions.set(requestId, {
+                callId,
+                threadId: turn.threadId,
+                request,
+                questionIds: mapped.map((entry) => entry.id),
+              });
+              yield* emit({
+                type: "turn_item.updated",
+                driver: XI_PROVIDER,
+                turnItem: {
+                  id: TurnItemId.make(`xi-question-${callId}`),
+                  threadId: turn.threadId as never,
+                  runId: turn.runId as never,
+                  nodeId: turn.nodeId as never,
+                  providerThreadId: thread.id,
+                  providerTurnId: turn.id,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: itemOrdinals.get(`question:${callId}`) ?? nextItemOrdinal++,
+                  status: "pending",
+                  title: "Question",
+                  startedAt: at,
+                  completedAt: null,
+                  updatedAt: at,
+                  type: "user_input_request",
+                  requestId,
+                  questions: mapped,
+                } as never,
+              });
+              yield* emit({
+                type: "runtime_request.updated",
+                driver: XI_PROVIDER,
+                threadId: turn.threadId as never,
+                runtimeRequest: request,
+              });
               continue;
             }
             if (notification.method === "session/run_done") {
@@ -746,6 +864,42 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
             ),
           respondToRuntimeRequest: Effect.fn("XiAdapterV2.respondToRuntimeRequest")(
             function* (responseInput) {
+              const pendingQuestion = pendingQuestions.get(responseInput.requestId);
+              if (pendingQuestion !== undefined) {
+                const answers = responseInput.answers;
+                const rows = pendingQuestion.questionIds.map((id) => {
+                  const value = answers?.[id];
+                  if (typeof value === "string") return [value];
+                  if (Array.isArray(value)) {
+                    return value.filter((entry): entry is string => typeof entry === "string");
+                  }
+                  return [];
+                });
+                yield* replyXiQuestion(connection, pendingQuestion.callId, rows).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                        driver: XI_PROVIDER,
+                        requestId: responseInput.requestId,
+                        cause,
+                      }),
+                  ),
+                );
+                pendingQuestions.delete(responseInput.requestId);
+                const resolvedAt = yield* DateTime.now;
+                yield* emit({
+                  type: "runtime_request.updated",
+                  driver: XI_PROVIDER,
+                  threadId: pendingQuestion.threadId as never,
+                  runtimeRequest: {
+                    ...pendingQuestion.request,
+                    status: "resolved",
+                    answers,
+                    resolvedAt,
+                  },
+                });
+                return;
+              }
               const pending = approvals.get(responseInput.requestId);
               if (pending === undefined) {
                 return yield* new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({

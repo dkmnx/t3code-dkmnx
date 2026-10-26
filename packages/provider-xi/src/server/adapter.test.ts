@@ -34,9 +34,17 @@ process.stdin.on("data", (chunk) => {
       send({ jsonrpc: "2.0", id: message.id, result: {} });
     } else if (message.method === "session/prompt") {
       send({ jsonrpc: "2.0", id: message.id, result: { accepted: true } });
-      send({ jsonrpc: "2.0", method: "session/message", params: { sessionId: "s1", event: "message_end", message: { role: "assistant", content: [{ type: "text", text: "hello from xi" }] } } });
-      send({ jsonrpc: "2.0", method: "session/plan", params: { sessionId: "s1", tasks: [{ id: 1, subject: "do it", status: "completed" }] } });
-      send({ jsonrpc: "2.0", method: "session/usage", params: { sessionId: "s1", contextTokens: 10, contextOK: true, contextWindow: 100, usage: { Input: 5, Output: 2, CacheRead: 0 } } });
+      if (message.params.prompt === "ask") {
+        send({ jsonrpc: "2.0", method: "session/question", params: { sessionId: "s1", callId: "call-1", questions: [{ Question: "Pick one", Header: "Choice", Options: [{ Label: "A", Description: "first" }, { Label: "B", Description: "second" }] }] } });
+      } else {
+        send({ jsonrpc: "2.0", method: "session/message", params: { sessionId: "s1", event: "message_end", message: { role: "assistant", content: [{ type: "text", text: "hello from xi" }] } } });
+        send({ jsonrpc: "2.0", method: "session/plan", params: { sessionId: "s1", tasks: [{ id: 1, subject: "do it", status: "completed" }] } });
+        send({ jsonrpc: "2.0", method: "session/usage", params: { sessionId: "s1", contextTokens: 10, contextOK: true, contextWindow: 100, usage: { Input: 5, Output: 2, CacheRead: 0 } } });
+        send({ jsonrpc: "2.0", method: "session/run_done", params: { sessionId: "s1", error: "", errorKind: "", window: "", resetsAt: "" } });
+      }
+    } else if (message.method === "session/question_reply") {
+      send({ jsonrpc: "2.0", id: message.id, result: {} });
+      send({ jsonrpc: "2.0", method: "session/message", params: { sessionId: "s1", event: "message_end", message: { role: "assistant", content: [{ type: "text", text: "answer received" }] } } });
       send({ jsonrpc: "2.0", method: "session/run_done", params: { sessionId: "s1", error: "", errorKind: "", window: "", resetsAt: "" } });
     }
   }
@@ -149,6 +157,86 @@ describe("XiAdapterV2", () => {
           );
         }),
       ).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect("surfaces a question and forwards the answer", () =>
+    Effect.gen(function* () {
+      const dir = yield* Effect.tryPromise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "xi-adapter-")),
+      );
+      const agentFile = NodePath.join(dir, "agent.mjs");
+      const wrapper = NodePath.join(dir, "xi");
+      yield* Effect.tryPromise(() => NodeFSP.writeFile(agentFile, fakeAgent));
+      yield* Effect.tryPromise(() =>
+        NodeFSP.writeFile(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${agentFile}"\n`),
+      );
+      yield* Effect.tryPromise(() => NodeFSP.chmod(wrapper, 0o755));
+      const config = decodeXiSettings({ enabled: true, binaryPath: wrapper, launchArgs: "" });
+      const adapter = yield* XiAdapterV2Driver.create({
+        instanceId,
+        displayName: undefined,
+        environment: [],
+        enabled: true,
+        config,
+      });
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+        initialProviderItemIdentityVersion: 2,
+      } as never);
+      const thread = yield* runtime.ensureThread({
+        threadId,
+        title: "xi test",
+        modelSelection,
+        runtimePolicy,
+      } as never);
+      yield* runtime.startTurn({
+        threadId,
+        runId: "run-2",
+        runOrdinal: 1,
+        providerTurnOrdinal: 1,
+        attemptId: "attempt-2",
+        rootNodeId: "node-2",
+        providerThread: thread,
+        message: { messageId: "message-2", text: "ask", attachments: [] },
+        modelSelection,
+        runtimePolicy,
+        appThread: {},
+      } as never);
+      const pending = Array.from(
+        yield* runtime.events.pipe(
+          Stream.takeUntil((event) => {
+            const value = event as unknown as { type: string; runtimeRequest?: { kind?: string } };
+            return (
+              value.type === "runtime_request.updated" &&
+              value.runtimeRequest?.kind === "user_input"
+            );
+          }),
+          Stream.runCollect,
+        ),
+      );
+      expect(
+        pending.some((event) => {
+          const value = event as unknown as { type: string; turnItem?: { type?: string } };
+          return (
+            value.type === "turn_item.updated" && value.turnItem?.type === "user_input_request"
+          );
+        }),
+      ).toBe(true);
+      yield* runtime.respondToRuntimeRequest({
+        requestId: "xi-call-1",
+        answers: { q1: "A" },
+      } as never);
+      const rest = Array.from(
+        yield* runtime.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        ),
+      );
+      expect(rest.some((event) => event.type === "message.updated")).toBe(true);
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 });
