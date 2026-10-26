@@ -372,10 +372,22 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
               itemOrdinals.set(callId, ordinal);
               const at = yield* DateTime.now;
               const result = notification.params["result"];
+              const resultRecord =
+                typeof result === "object" && result !== null
+                  ? (result as Record<string, unknown>)
+                  : undefined;
               const failed =
-                typeof result === "object" &&
-                result !== null &&
-                (result as Record<string, unknown>)["isError"] === true;
+                resultRecord?.["IsError"] === true || resultRecord?.["isError"] === true;
+              const content = resultRecord?.["Content"];
+              const output =
+                typeof content === "string" && content.trim() !== "" ? content : undefined;
+              const argumentsRecord = notification.params["arguments"];
+              const command =
+                typeof argumentsRecord === "object" &&
+                argumentsRecord !== null &&
+                typeof (argumentsRecord as Record<string, unknown>)["command"] === "string"
+                  ? ((argumentsRecord as Record<string, unknown>)["command"] as string)
+                  : undefined;
               const status =
                 event === "tool_execution_end"
                   ? failed
@@ -395,14 +407,14 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
                 parentItemId: null,
                 ordinal,
                 status: status as never,
-                title: name,
+                title: command ?? name,
                 startedAt: at,
                 completedAt: status === "completed" || status === "failed" ? at : null,
                 updatedAt: at,
                 type: "dynamic_tool" as const,
                 toolName: name,
                 input: notification.params["arguments"] ?? {},
-                ...(result === undefined ? {} : { output: result }),
+                ...(output === undefined ? {} : { output }),
               };
               yield* emit({
                 type: "turn_item.updated",
