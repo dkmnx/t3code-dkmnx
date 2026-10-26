@@ -402,6 +402,22 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
               runOrdinal: turnInput.runOrdinal,
               messageId: `xi-${turnInput.attemptId}-assistant`,
             };
+            const startedAt = yield* DateTime.now;
+            yield* emit({
+              type: "provider_turn.updated",
+              driver: XI_PROVIDER,
+              providerTurn: {
+                id: activeTurn.id,
+                providerThreadId: currentThread.id,
+                nodeId: turnInput.rootNodeId,
+                runAttemptId: turnInput.attemptId,
+                nativeTurnRef: null,
+                ordinal: turnInput.providerTurnOrdinal,
+                status: "running",
+                startedAt,
+                completedAt: null,
+              },
+            });
             yield* promptXiSession(
               connection,
               opened.sessionId,
