@@ -253,6 +253,17 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
           activeTurn = null;
           if (turn === null || thread === null) return;
           const errorText = typeof runDone["error"] === "string" ? runDone["error"] : "";
+          sessionEntity = {
+            ...sessionEntity,
+            status: "ready",
+            lastError: errorText === "" ? null : errorText,
+            updatedAt: yield* DateTime.now,
+          };
+          yield* emit({
+            type: "provider_session.updated",
+            driver: XI_PROVIDER,
+            providerSession: sessionEntity,
+          });
           if (errorText === "") {
             yield* emit({
               type: "turn.terminal",
@@ -824,6 +835,16 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
                 startedAt,
                 completedAt: null,
               },
+            });
+            sessionEntity = {
+              ...sessionEntity,
+              status: "running",
+              updatedAt: yield* DateTime.now,
+            };
+            yield* emit({
+              type: "provider_session.updated",
+              driver: XI_PROVIDER,
+              providerSession: sessionEntity,
             });
             yield* promptXiSession(
               connection,
