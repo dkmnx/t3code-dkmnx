@@ -3,6 +3,10 @@ import {
   ProviderDriverKind,
   ProviderThreadId,
   ProviderTurnId,
+  RuntimeRequestId,
+  TurnItemId,
+  type OrchestrationV2RuntimeRequest,
+  type ProviderApprovalDecision,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
@@ -31,6 +35,7 @@ import {
   closeXiSession,
   openXiSession,
   promptXiSession,
+  replyXiApproval,
   setXiModel,
 } from "./session.ts";
 
@@ -213,6 +218,16 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
           updatedAt: yield* DateTime.now,
           lastError: null,
         };
+        const approvals = new Map<
+          string,
+          {
+            readonly callId: string;
+            readonly threadId: string;
+            readonly request: OrchestrationV2RuntimeRequest;
+          }
+        >();
+        const itemOrdinals = new Map<string, number>();
+        let nextItemOrdinal = 1;
 
         const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
           Queue.offer(events, event).pipe(Effect.asVoid);
@@ -230,6 +245,19 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
               providerTurnId: turn.id,
               runOrdinal: turn.runOrdinal,
               status: "completed",
+              failure: null,
+              threadDisposition: "reusable",
+            });
+            return;
+          }
+          if (/context canceled|request was aborted/i.test(errorText)) {
+            yield* emit({
+              type: "turn.terminal",
+              driver: XI_PROVIDER,
+              providerThreadId: thread.id,
+              providerTurnId: turn.id,
+              runOrdinal: turn.runOrdinal,
+              status: "interrupted",
               failure: null,
               threadDisposition: "reusable",
             });
@@ -290,6 +318,95 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
                   createdAt: at,
                   updatedAt: at,
                 },
+              });
+              continue;
+            }
+            if (notification.method === "session/tool") {
+              const turn = activeTurn;
+              if (turn === null || thread === null) continue;
+              const callId =
+                typeof notification.params["callId"] === "string"
+                  ? notification.params["callId"]
+                  : "";
+              if (callId === "") continue;
+              const name =
+                typeof notification.params["name"] === "string"
+                  ? notification.params["name"]
+                  : "tool";
+              const event = notification.params["event"];
+              const ordinal = itemOrdinals.get(callId) ?? nextItemOrdinal++;
+              itemOrdinals.set(callId, ordinal);
+              const at = yield* DateTime.now;
+              const result = notification.params["result"];
+              const failed =
+                typeof result === "object" &&
+                result !== null &&
+                (result as Record<string, unknown>)["isError"] === true;
+              const status =
+                event === "tool_execution_end"
+                  ? failed
+                    ? "failed"
+                    : "completed"
+                  : event === "tool_execution_start"
+                    ? "running"
+                    : "pending";
+              const item = {
+                id: TurnItemId.make(`xi-${callId}`),
+                threadId: turn.threadId as never,
+                runId: turn.runId as never,
+                nodeId: turn.nodeId as never,
+                providerThreadId: thread.id,
+                providerTurnId: turn.id,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal,
+                status: status as never,
+                title: name,
+                startedAt: at,
+                completedAt: status === "completed" || status === "failed" ? at : null,
+                updatedAt: at,
+                type: "dynamic_tool" as const,
+                toolName: name,
+                input: notification.params["arguments"] ?? {},
+                ...(result === undefined ? {} : { output: result }),
+              };
+              yield* emit({
+                type: "turn_item.updated",
+                driver: XI_PROVIDER,
+                turnItem: item as never,
+              });
+              continue;
+            }
+            if (notification.method === "session/approval") {
+              const turn = activeTurn;
+              if (turn === null || thread === null) continue;
+              const callId =
+                typeof notification.params["callId"] === "string"
+                  ? notification.params["callId"]
+                  : "";
+              if (callId === "") continue;
+              const requestId = RuntimeRequestId.make(`xi-${callId}`);
+              const at = yield* DateTime.now;
+              const request: OrchestrationV2RuntimeRequest = {
+                id: requestId,
+                nodeId: turn.nodeId as never,
+                providerTurnId: turn.id,
+                nativeRequestRef: null,
+                kind: "permission",
+                status: "pending",
+                responseCapability: {
+                  type: "live",
+                  providerSessionId: sessionInput.providerSessionId,
+                },
+                createdAt: at,
+                resolvedAt: null,
+              };
+              approvals.set(requestId, { callId, threadId: turn.threadId, request });
+              yield* emit({
+                type: "runtime_request.updated",
+                driver: XI_PROVIDER,
+                threadId: turn.threadId as never,
+                runtimeRequest: request,
               });
               continue;
             }
@@ -455,13 +572,49 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
                   }),
               ),
             ),
-          respondToRuntimeRequest: (responseInput) =>
-            Effect.fail(
-              new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+          respondToRuntimeRequest: Effect.fn("XiAdapterV2.respondToRuntimeRequest")(
+            function* (responseInput) {
+              const pending = approvals.get(responseInput.requestId);
+              if (pending === undefined) {
+                return yield* new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                  driver: XI_PROVIDER,
+                  requestId: responseInput.requestId,
+                  cause: new Error("unknown xi approval request"),
+                });
+              }
+              const decision: ProviderApprovalDecision = responseInput.decision ?? "cancel";
+              const mapped =
+                decision === "accept"
+                  ? "allow-once"
+                  : decision === "acceptForSession" || decision === "acceptAlways"
+                    ? "allow-always"
+                    : "reject";
+              yield* replyXiApproval(connection, pending.callId, mapped).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                      driver: XI_PROVIDER,
+                      requestId: responseInput.requestId,
+                      cause,
+                    }),
+                ),
+              );
+              approvals.delete(responseInput.requestId);
+              const resolvedAt = yield* DateTime.now;
+              const request = {
+                ...pending.request,
+                status: "resolved" as const,
+                decision,
+                resolvedAt,
+              };
+              yield* emit({
+                type: "runtime_request.updated",
                 driver: XI_PROVIDER,
-                requestId: responseInput.requestId,
-              }),
-            ),
+                threadId: pending.threadId as never,
+                runtimeRequest: request,
+              });
+            },
+          ),
           readThreadSnapshot: (snapshotInput) =>
             Effect.succeed({
               providerThread: snapshotInput.providerThread,
