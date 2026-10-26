@@ -36,7 +36,9 @@ import {
   openXiSession,
   promptXiSession,
   replyXiApproval,
+  replyXiQuestion,
   setXiModel,
+  setXiThinking,
 } from "./session.ts";
 
 const XI_PROVIDER = ProviderDriverKind.make("xi");
@@ -86,19 +88,19 @@ const XiProviderCapabilitiesV2 = {
     emitsMessageCompleted: false,
   },
   tools: {
-    exposesToolItemIds: false,
-    emitsToolStarted: false,
-    emitsToolCompleted: false,
-    emitsToolOutput: false,
+    exposesToolItemIds: true,
+    emitsToolStarted: true,
+    emitsToolCompleted: true,
+    emitsToolOutput: true,
     supportsMcpTools: false,
     supportsDynamicToolCallbacks: false,
   },
   approvals: {
-    supportsCommandApproval: false,
-    supportsFileReadApproval: false,
-    supportsFileChangeApproval: false,
+    supportsCommandApproval: true,
+    supportsFileReadApproval: true,
+    supportsFileChangeApproval: true,
     supportsApplyPatchApproval: false,
-    approvalsHaveNativeRequestIds: false,
+    approvalsHaveNativeRequestIds: true,
     approvalCallbacksAreLiveOnly: true,
     approvalsCanOriginateFromSubagents: false,
   },
@@ -198,6 +200,7 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
 
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         let thread: OrchestrationV2ProviderThread | null = null;
+        let appliedThinking = opened.thinkingLevel ?? null;
         let activeTurn: {
           readonly id: OrchestrationV2ProviderTurn["id"];
           readonly runId: string;
@@ -410,6 +413,14 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
               });
               continue;
             }
+            if (notification.method === "session/question") {
+              const callId =
+                typeof notification.params["callId"] === "string"
+                  ? notification.params["callId"]
+                  : "";
+              if (callId !== "") yield* replyXiQuestion(connection, callId, undefined);
+              continue;
+            }
             if (notification.method === "session/run_done") {
               yield* finishTurn(notification.params);
             }
@@ -510,6 +521,28 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
                 model: turnInput.modelSelection.model,
                 updatedAt: yield* DateTime.now,
               };
+              appliedThinking =
+                getModelSelectionStringOptionValue(turnInput.modelSelection, "thinking") ??
+                appliedThinking;
+            }
+            const requestedThinking = getModelSelectionStringOptionValue(
+              turnInput.modelSelection,
+              "thinking",
+            );
+            if (requestedThinking !== undefined && requestedThinking !== appliedThinking) {
+              yield* setXiThinking(connection, opened.sessionId, requestedThinking).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterTurnStartError({
+                      driver: XI_PROVIDER,
+                      threadId: turnInput.threadId,
+                      providerThreadId: currentThread.id,
+                      runId: turnInput.runId,
+                      cause,
+                    }),
+                ),
+              );
+              appliedThinking = requestedThinking;
             }
             activeTurn = {
               id: ProviderTurnId.make(`xi-${turnInput.attemptId}`),
