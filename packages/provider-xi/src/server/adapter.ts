@@ -121,12 +121,12 @@ export const XiAdapterV2Driver: ProviderAdapterDriver<XiSettings, XiAdapterV2Dri
       ProviderAdapter.ProviderAdapterV2.of({
         instanceId: input.instanceId,
         driver: XI_PROVIDER,
-        getCapabilities: Effect.fn("XiAdapterV2.getCapabilities")(function* () {
-          return XiProviderCapabilitiesV2;
-        }),
-        planSelectionTransition: Effect.fn("XiAdapterV2.planSelectionTransition")(function* () {
-          return turnScopedSelectionTransition();
-        }),
+        getCapabilities: Effect.fn("XiAdapterV2.getCapabilities")(() =>
+          Effect.succeed(XiProviderCapabilitiesV2),
+        ),
+        planSelectionTransition: Effect.fn("XiAdapterV2.planSelectionTransition")(() =>
+          Effect.succeed(turnScopedSelectionTransition()),
+        ),
         openSession: Effect.fn("XiAdapterV2.openSession")(function* (
           session: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
         ) {
